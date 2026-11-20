@@ -15,7 +15,7 @@ new p5((p) => {
   let fernFilename = "";
   let svgWidth = 0, svgHeight = 0;
   let recordSVG = false, savePreview = false, needsRebuild = true;
-  let frondBendRadius = 600, spiralAngleDeg = 70;
+  let frondBendRadius = 600, spiralAngleDeg = 90;
   let frondNum = 11, maxFernDistance = 500, maxRingAngle = 360;
   let hudDiv = null;
   let frondGeom = null;
@@ -83,10 +83,11 @@ new p5((p) => {
       for (const v of pathPts) {
         const flippedY = svgHeight - v.y;
         const normalizedY = p.constrain(flippedY / svgHeight, 0.0, 1.0);
-        const theta = normalizedY * p.radians(spiralAngleDeg);
+        const aspect = svgHeight / svgWidth;
+        const theta = normalizedY * p.radians(spiralAngleDeg) * p.constrain(aspect, 0.5, 1.5);
         const centeredX = v.x - svgWidth / 2;
         const xFlare = 0.1;
-        const r = frondBendRadius * p.pow(PHI, -theta / p.HALF_PI);
+        const r = frondBendRadius;
         const bentX = centeredX * (1 + xFlare * normalizedY);
         const bentY = r * p.sin(theta);
         const bentZ = frondBendRadius - r * p.cos(theta);
@@ -107,24 +108,37 @@ new p5((p) => {
     return subpaths.filter((s) => s.length > 1);
   }
 
-  function rebuildFrondCache() {
-    if (!fernSVG) return;
-    bentSubsCache = buildBentFrond();
-    frondGeom = p.buildGeometry(() => {
-      p.noFill();
-      p.stroke(0);
-      for (const sub of bentSubsCache) {
-        if (sub.length < 2) continue;
-        p.beginShape();
-        for (const v of sub) p.vertex(v.x, v.y, v.z);
-        p.endShape();
-      }
-    });
-    console.log(
-      `Rebuilt geom -> R:${p.nf(frondBendRadius, 0, 1)} S:${p.nf(spiralAngleDeg, 0, 1)} N:${frondNum}`,
-    );
-  }
+function rebuildFrondCache() {
+  if (!fernSVG) return;
+  bentSubsCache = buildBentFrond();
+  applyGravityDroop(bentSubsCache, 0.4);
+  frondGeom = p.buildGeometry(() => {
+    p.noFill();
+    p.stroke(0);
+    for (const sub of bentSubsCache) {
+      if (sub.length < 2) continue;
+      p.beginShape();
+      for (const v of sub) p.vertex(v.x, v.y, v.z);
+      p.endShape();
+    }
+  });
+  console.log(
+    `Rebuilt geom -> R:${p.nf(frondBendRadius, 0, 1)} S:${p.nf(spiralAngleDeg, 0, 1)} N:${frondNum}`,
+  );
+}
 
+function applyGravityDroop(subs, k) {
+  for (const sub of subs) {
+    const n = sub.length;
+    if (n < 2) continue;
+    const stemLen = sub[n - 1].y - sub[0].y;
+    if (stemLen === 0) continue;
+    for (let i = 0; i < n; i++) {
+      const t = i / (n - 1);
+      sub[i].y += k * t * t * Math.abs(stemLen);
+    }
+  }
+}
   // ---- HUD ----
   function updateHUD() {
     if (!hudDiv) return;
@@ -191,48 +205,15 @@ new p5((p) => {
     updateHUD();
   };
 
-  // TODO: Refactor following the Single Responsibility Principle
   p.draw = function () {
-    if (needsRebuild) {
-      rebuildFrondCache();
-      needsRebuild = false;
-    }
+    handleDeferred();
     if (!frondGeom) return;
-    const rec = recordSVG;
-    let recSession = null;
-    if (rec) recSession = Glade.beginSVGRecord(p);
-    p.background(255);
-    p.noFill();
-    p.stroke(0);
-    p.strokeWeight(1);
-    p.push();
-    p.translate(0, p.height * 0.2, -300);
-    p.rotateX(p.map(p.mouseY, 0, p.height, -p.PI, p.PI));
-    p.rotateY(p.map(p.mouseX, 0, p.width, -p.PI, p.PI));
-    p.scale(0.5);
-    p.randomSeed(1234);
-    const rR = [], rZ = [];
-    for (let i = 0; i < frondNum; i++) {
-      rR.push(p.random(p.radians(30)));
-      rZ.push(p.random(maxFernDistance));
-    }
-    for (let i = 0; i < frondNum; i++) {
-      const ringAngle = p.map(i, 0, frondNum, 0, p.radians(maxRingAngle));
-      p.push();
-      p.rotateY(ringAngle);
-      p.rotateX(rR[i]);
-      p.translate(0, 0, rZ[i]);
-      let mvArr = null, pjArr = null;
-      if (rec) {
-        mvArr = p._renderer.uMVMatrix.mat4.slice();
-        pjArr = p._renderer.uPMatrix.mat4.slice();
-      }
-      p.model(frondGeom);
-      p.pop();
-      if (rec) Glade.recordFrond(p, mvArr, pjArr, bentSubsCache, recSession);
-    }
-    p.pop();
-    if (rec) {
+
+    const recSession = recordSVG ? Glade.beginSVGRecord(p) : null;
+
+    drawScene(p, recSession);
+
+    if (recSession) {
       Glade.endSVGRecord(p, recSession, generateFilename());
       recordSVG = false;
       console.log("yay SVG exported!");
@@ -243,6 +224,70 @@ new p5((p) => {
       console.log("Saved preview.png");
     }
   };
+
+  function handleDeferred() {
+    if (needsRebuild) {
+      rebuildFrondCache();
+      needsRebuild = false;
+    }
+  }
+
+  function drawScene(p, recSession) {
+    p.background(255);
+    p.noFill();
+    p.stroke(0);
+    p.strokeWeight(1);
+
+    p.push();
+    applyCamera(p);
+    p.scale(0.5);
+
+    const { rR, rZ } = sampleFrondRandoms(p);
+    drawFronds(p, rR, rZ, recSession);
+
+    p.pop();
+  }
+
+  function applyCamera(p) {
+    p.translate(0, p.height * 0.2, -300);
+    p.rotateX(p.map(p.mouseY, 0, p.height, -p.PI, p.PI));
+    p.rotateY(p.map(p.mouseX, 0, p.width, -p.PI, p.PI));
+  }
+
+  function sampleFrondRandoms(p) {
+    p.randomSeed(1234);
+    const rR = [], rZ = [];
+    for (let i = 0; i < frondNum; i++) {
+      // randomize tilt
+      rR.push(p.random(p.radians(8)));
+      rZ.push(p.random(maxFernDistance));
+    }
+    return { rR, rZ };
+  }
+
+  function drawFronds(p, rR, rZ, recSession) {
+    for (let i = 0; i < frondNum; i++) {
+      p.push();
+      const ringAngle = p.map(i, 0, frondNum, 0, p.radians(maxRingAngle));
+      p.rotateY(ringAngle);
+      const t = i / frondNum; // 0..1 along the ring
+      const bias = p.lerp(p.radians(2), p.radians(12), t);
+      p.rotateX(rR[i] + bias); // outer fronds lean more
+      p.translate(0, 0, rZ[i]);
+      const mats = captureMatrices(p, recordSVG);
+      p.model(frondGeom);
+      p.pop();
+      if (recordSVG) Glade.recordFrond(p, mats.mv, mats.pj, bentSubsCache, recSession);
+    }
+  }
+
+  function captureMatrices(p, rec) {
+    if (!rec) return { mv: null, pj: null };
+    return {
+      mv: p._renderer.uMVMatrix.mat4.slice(),
+      pj: p._renderer.uPMatrix.mat4.slice(),
+    };
+  }
 
   p.keyPressed = function () {
     let changed = false;
